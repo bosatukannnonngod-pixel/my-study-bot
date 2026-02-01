@@ -5,10 +5,11 @@ from datetime import datetime, timedelta, timezone
 import re
 import os
 
-# --- 設定 ---
+# --- 1. 基本設定 ---
 TOKEN = os.getenv('TOKEN')
-JST = timezone(timedelta(hours=9))
+JST = timezone(timedelta(hours=9)) # 日本時間
 
+# ランクのしきい値
 ROLES_CONFIG = {
     (0, 5): "メタル",
     (6, 10): "シルバー",
@@ -21,8 +22,10 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# データベースの場所
 DB_PATH = '/tmp/study_data.db'
 
+# --- 2. データベースの初期化 ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -31,6 +34,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+# --- 3. 時間の文字解析 ---
 def parse_duration(text):
     minutes = 0
     hr_match = re.search(r'(\d+(\.\d+)?)時間', text)
@@ -41,6 +45,7 @@ def parse_duration(text):
         minutes += int(min_match.group(1))
     return int(minutes)
 
+# --- 4. ロールの更新機能 ---
 async def update_roles(member, weekly_hrs):
     target_role_name = None
     if weekly_hrs > 20:
@@ -52,17 +57,22 @@ async def update_roles(member, weekly_hrs):
                 break
     
     if not target_role_name: return "なし"
+
     all_study_roles = list(ROLES_CONFIG.values())
     roles_to_remove = [r for r in member.roles if r.name in all_study_roles and r.name != target_role_name]
     new_role = discord.utils.get(member.guild.roles, name=target_role_name)
     
     if new_role:
         try:
-            if roles_to_remove: await member.remove_roles(*roles_to_remove)
-            if new_role not in member.roles: await member.add_roles(new_role)
-        except: pass
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove)
+            if new_role not in member.roles:
+                await member.add_roles(new_role)
+        except Exception as e:
+            print(f"Role Update Error: {e}")
     return target_role_name
 
+# --- 5. メインイベント ---
 @bot.event
 async def on_ready():
     init_db()
@@ -71,24 +81,53 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     if message.author.bot: return
+
     duration = parse_duration(message.content)
     if duration > 0:
         user_id = message.author.id
-        now = datetime.now(JST)
+        now = datetime.now(JST) # 常に日本時間で処理
+        
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (user_id, duration, now.strftime('%Y-%m-%d')))
+            
+            # 記録を保存
+            c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", 
+                      (user_id, duration, now.strftime('%Y-%m-%d')))
             conn.commit()
+            
+            # 今週の月曜日を探す（日曜日でも正しく計算）
             monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (user_id, monday.strftime('%Y-%m-%d')))
+            start_date = monday.strftime('%Y-%m-%d')
+            
+            # 合計を計算
+            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (user_id, start_date))
             weekly_min = c.fetchone()[0] or 0
+            
             c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (user_id,))
             total_min = c.fetchone()[0] or 0
+            
             conn.close()
-            weekly_hrs, total_hrs = weekly_min / 60, total_min / 60
+
+            # 表示用に変換
+            weekly_hrs = weekly_min / 60
+            total_hrs = total_min / 60
+
+            # ロール更新
             current_rank = await update_roles(message.author, weekly_hrs)
-            await message.channel.send(f"✅ **{message.author.display_name}さんの記録完了！**\n今回の学習: {duration}分\n今週の合計: **{weekly_hrs:.1f}時間**\n全累計: **{total_hrs:.1f}時間**\n現在のランク: **{current_rank}**")
+
+            await message.channel.send(
+                f"✅ **{message.author.display_name}さんの記録完了！**\n"
+                f"今回の学習: {duration}分\n"
+                f"今週の合計: **{weekly_hrs:.1f}時間**\n"
+                f"全累計: **{total_hrs:.1f}時間**\n"
+                f"現在のランク: **{current_rank}**"
+            )
         except Exception as e:
             await message.channel.send(f"⚠️ 保存エラー: {e}")
+
     await bot.process_commands(message)
+
+# 起動
+if __name__ == "__main__":
+    bot.run(TOKEN)
