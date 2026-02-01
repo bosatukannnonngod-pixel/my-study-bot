@@ -7,8 +7,6 @@ import os
 
 # --- 設定 ---
 TOKEN = os.getenv('TOKEN')
-
-# 日本時間(JST)の設定
 JST = timezone(timedelta(hours=9))
 
 ROLES_CONFIG = {
@@ -73,49 +71,24 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     if message.author.bot: return
-
     duration = parse_duration(message.content)
     if duration > 0:
         user_id = message.author.id
-        # 日本時間で現在時刻を取得
         now = datetime.now(JST)
-        
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            
-            # データの保存
-            c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", 
-                      (user_id, duration, now.strftime('%Y-%m-%d')))
+            c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (user_id, duration, now.strftime('%Y-%m-%d')))
             conn.commit()
-            
-            # 【日曜日対策】今週の月曜日 0:00 を計算
-            # weekday()は月曜=0, 日曜=6なので、今日からその日数分引く
             monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            start_of_week = monday.strftime('%Y-%m-%d')
-            
-            # 今週の合計
-            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (user_id, start_of_week))
+            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (user_id, monday.strftime('%Y-%m-%d')))
             weekly_min = c.fetchone()[0] or 0
-            
-            # 全累計
             c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (user_id,))
             total_min = c.fetchone()[0] or 0
-            
             conn.close()
-
-            weekly_hrs = weekly_min / 60
-            total_hrs = total_min / 60
+            weekly_hrs, total_hrs = weekly_min / 60, total_min / 60
             current_rank = await update_roles(message.author, weekly_hrs)
-
-            await message.channel.send(
-                f"✅ **{message.author.display_name}さんの記録完了！**\n"
-                f"今回の学習: {duration}分\n"
-                f"今週の合計: **{weekly_hrs:.1f}時間**\n"
-                f"全累計: **{total_hrs:.1f}時間**\n"
-                f"現在のランク: **{current_rank}**"
-            )
+            await message.channel.send(f"✅ **{message.author.display_name}さんの記録完了！**\n今回の学習: {duration}分\n今週の合計: **{weekly_hrs:.1f}時間**\n全累計: **{total_hrs:.1f}時間**\n現在のランク: **{current_rank}**")
         except Exception as e:
             await message.channel.send(f"⚠️ 保存エラー: {e}")
-
     await bot.process_commands(message)
