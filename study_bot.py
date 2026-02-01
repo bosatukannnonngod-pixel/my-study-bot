@@ -3,10 +3,10 @@ from discord.ext import commands
 import sqlite3
 from datetime import datetime, timedelta
 import re
-import os　#
+import os #
 
 # --- 設定 ---
-TOKEN = os.getenv('TOKEN')　#
+TOKEN = os.getenv('TOKEN') #
 
 ROLES_CONFIG = {
     (0, 5): "メタル",
