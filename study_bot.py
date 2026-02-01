@@ -1,12 +1,15 @@
 import discord
 from discord.ext import commands
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import re
 import os
 
 # --- 設定 ---
 TOKEN = os.getenv('TOKEN')
+
+# 日本時間(JST)の設定
+JST = timezone(timedelta(hours=9))
 
 ROLES_CONFIG = {
     (0, 5): "メタル",
@@ -20,8 +23,10 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+DB_PATH = '/tmp/study_data.db'
+
 def init_db():
-    conn = sqlite3.connect('/tmp/study_data.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS study_logs
                  (user_id INTEGER, minutes INTEGER, date TEXT)''')
@@ -47,10 +52,12 @@ async def update_roles(member, weekly_hrs):
             if low <= weekly_hrs <= high:
                 target_role_name = name
                 break
+    
     if not target_role_name: return "なし"
     all_study_roles = list(ROLES_CONFIG.values())
     roles_to_remove = [r for r in member.roles if r.name in all_study_roles and r.name != target_role_name]
     new_role = discord.utils.get(member.guild.roles, name=target_role_name)
+    
     if new_role:
         try:
             if roles_to_remove: await member.remove_roles(*roles_to_remove)
@@ -66,28 +73,49 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     if message.author.bot: return
+
     duration = parse_duration(message.content)
     if duration > 0:
         user_id = message.author.id
-        now = datetime.now()
-        conn = sqlite3.connect('study_data.db')
-        c = conn.cursor()
-        c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (user_id, duration, now.strftime('%Y-%m-%d')))
-        conn.commit()
-        start_of_week = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
-        c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (user_id, start_of_week))
-        weekly_min = c.fetchone()[0] or 0
-        c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (user_id,))
-        total_min = c.fetchone()[0] or 0
-        conn.close()
-        weekly_hrs = weekly_min / 60
-        total_hrs = total_min / 60
-        current_rank = await update_roles(message.author, weekly_hrs)
-        await message.channel.send(
-            f"✅ **{message.author.display_name}さんの記録完了！**\n"
-            f"今回の学習: {duration}分\n"
-            f"今週の合計: **{weekly_hrs:.1f}時間**\n"
-            f"全累計: **{total_hrs:.1f}時間**\n"
-            f"現在のランク: **{current_rank}**"
-        )
+        # 日本時間で現在時刻を取得
+        now = datetime.now(JST)
+        
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            
+            # データの保存
+            c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", 
+                      (user_id, duration, now.strftime('%Y-%m-%d')))
+            conn.commit()
+            
+            # 【日曜日対策】今週の月曜日 0:00 を計算
+            # weekday()は月曜=0, 日曜=6なので、今日からその日数分引く
+            monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            start_of_week = monday.strftime('%Y-%m-%d')
+            
+            # 今週の合計
+            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (user_id, start_of_week))
+            weekly_min = c.fetchone()[0] or 0
+            
+            # 全累計
+            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (user_id,))
+            total_min = c.fetchone()[0] or 0
+            
+            conn.close()
+
+            weekly_hrs = weekly_min / 60
+            total_hrs = total_min / 60
+            current_rank = await update_roles(message.author, weekly_hrs)
+
+            await message.channel.send(
+                f"✅ **{message.author.display_name}さんの記録完了！**\n"
+                f"今回の学習: {duration}分\n"
+                f"今週の合計: **{weekly_hrs:.1f}時間**\n"
+                f"全累計: **{total_hrs:.1f}時間**\n"
+                f"現在のランク: **{current_rank}**"
+            )
+        except Exception as e:
+            await message.channel.send(f"⚠️ 保存エラー: {e}")
+
     await bot.process_commands(message)
