@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 import re
 
 # --- ここに自分のトークンを貼る ---
-TOKEN = 'MTQ2NzQ4NTI4NDQyOTA3NDcwOQ.GZH16y.-CO12jM1VouAAwBhevEvKrqA2DD9k4LLu4Xcys' 
+import os
+TOKEN = os.getenv('TOKEN')
 
 # ロール名の設定
 ROLES_CONFIG = {
