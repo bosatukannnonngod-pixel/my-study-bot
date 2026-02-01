@@ -21,7 +21,7 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 def init_db():
-    conn = sqlite3.connect('study_data.db')
+    conn = sqlite3.connect('/tmp/study_data.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS study_logs
                  (user_id INTEGER, minutes INTEGER, date TEXT)''')
