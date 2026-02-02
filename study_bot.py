@@ -5,10 +5,9 @@ from datetime import datetime, timedelta, timezone
 import re
 import os
 
-# --- 1. 基本設定 ---
 TOKEN = os.getenv('TOKEN')
 JST = timezone(timedelta(hours=9)) 
-KYOTSU_TEST_DATE = datetime(2027, 1, 16, tzinfo=JST) # 日付はここで調整
+KYOTSU_TEST_DATE = datetime(2027, 1, 16, tzinfo=JST)
 
 ROLES_CONFIG = {(0, 5): "メタル", (6, 10): "シルバー", (11, 15): "ゴールド", (16, 20): "マスター"}
 
@@ -61,45 +60,29 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot: return
     duration = parse_duration(message.content)
-    
     if duration > 0:
         now = datetime.now(JST)
-        # --- データベース処理 ---
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (message.author.id, duration, now.strftime('%Y-%m-%d')))
         conn.commit()
-        
         monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0)
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (message.author.id, monday.strftime('%Y-%m-%d')))
         weekly_hrs = (c.fetchone()[0] or 0) / 60
-        
         c.execute("SELECT user_id, SUM(minutes) as total FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY total DESC", (monday.strftime('%Y-%m-%d'),))
         ranking = c.fetchall()
         rank_num = next((i+1 for i, r in enumerate(ranking) if r[0] == message.author.id), 0)
         conn.close()
-
-        # --- ロール更新 ---
         current_rank = await update_roles(message.author, weekly_hrs)
-
-        # --- カウントダウンチャンネルへの送信 ---
+        
+        # カウントダウン送信
         countdown_channel = discord.utils.get(message.guild.channels, name="共通テストカウントダウン")
-        diff = KYOTSU_TEST_DATE - now
-        days_left = max(0, diff.days)
-
+        days_left = max(0, (KYOTSU_TEST_DATE - now).days)
         if countdown_channel:
-            await countdown_channel.send(
-                f"📢 **カウントダウン更新**\n"
-                f"{message.author.display_name}さんが勉強したよ！\n"
-                f"共通テストまであと **{days_left}日** 📅"
-            )
+            await countdown_channel.send(f"📢 **カウントダウン更新**\n{message.author.display_name}さんが勉強したよ！\n共通テストまであと **{days_left}日** 📅")
 
-        # --- 本人への返信 ---
-        await message.channel.send(
-            f"📝 **{message.author.display_name}さんの学習記録**\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"✅ 今回: {duration}分 / 今週: **{weekly_hrs:.1f}時間** ({rank_num}位)\n"
-            f"🎖️ ランク: **{current_rank}**"
-        )
-
+        await message.channel.send(f"📝 **{message.author.display_name}さんの学習記録**\n━━━━━━━━━━━━━━━━━━\n✅ 今回: {duration}分 / 今週: **{weekly_hrs:.1f}時間** ({rank_num}位)\n🎖️ ランク: **{current_rank}**")
     await bot.process_commands(message)
+
+if __name__ == "__main__":
+    bot.run(TOKEN)
