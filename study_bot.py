@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import re
 import os
 
+# --- 1. 基本設定 ---
 TOKEN = os.getenv('TOKEN')
 JST = timezone(timedelta(hours=9)) 
 KYOTSU_TEST_DATE = datetime(2027, 1, 16, tzinfo=JST)
@@ -75,7 +76,6 @@ async def on_message(message):
         conn.close()
         current_rank = await update_roles(message.author, weekly_hrs)
         
-        # カウントダウン送信
         countdown_channel = discord.utils.get(message.guild.channels, name="共通テストカウントダウン")
         days_left = max(0, (KYOTSU_TEST_DATE - now).days)
         if countdown_channel:
@@ -84,5 +84,5 @@ async def on_message(message):
         await message.channel.send(f"📝 **{message.author.display_name}さんの学習記録**\n━━━━━━━━━━━━━━━━━━\n✅ 今回: {duration}分 / 今週: **{weekly_hrs:.1f}時間** ({rank_num}位)\n🎖️ ランク: **{current_rank}**")
     await bot.process_commands(message)
 
-if __name__ == "__main__":
-    bot.run(TOKEN)
+# 最後の起動命令（ここが一番大事！）
+bot.run(TOKEN)
