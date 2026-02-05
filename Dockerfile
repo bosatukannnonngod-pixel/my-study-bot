@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 6. ボットを起動（ファイル名が main.py の場合）
-CMD ["python", "main.py"]
+CMD ["python", "study_bot.py"]
