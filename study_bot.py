@@ -94,6 +94,8 @@ async def play_audio(vc, filename):
             print(f"Audio Play Error: {e}")
 
 # --- 6. ポモドーロ機能 ---
+active_pomodoros = {} # 終了管理用
+
 @bot.command()
 async def pomodoro(ctx):
     if not ctx.author.voice:
@@ -106,24 +108,49 @@ async def pomodoro(ctx):
     except discord.ClientException:
         vc = ctx.voice_client
 
-    await ctx.send("🍅 **ポモドーロ開始！** (25分集中 / 5分休憩)")
+    active_pomodoros[ctx.guild.id] = True
+    await ctx.send("🍅 **ポモドーロ開始！** (25分集中 / 5分休憩)\n※移動しても追いかけます！")
     await play_audio(vc, "start.mp3")
 
-    while True:
-        await asyncio.sleep(1500) 
-        await play_audio(vc, "start.mp3")
-        mentions = " ".join([m.mention for m in channel.members])
-        await ctx.send(f"{mentions}\n☕ **25分経過！5分間の休憩タイムです。**")
-        
-        await asyncio.sleep(300) 
-        await play_audio(vc, "start.mp3")
-        await ctx.send(f"{mentions}\n🚀 **休憩終了！集中タイム再開！**")
+    try:
+        while active_pomodoros.get(ctx.guild.id):
+            # 集中タイム (25分)
+            for _ in range(1500):
+                if not active_pomodoros.get(ctx.guild.id): return
+                await asyncio.sleep(1)
+            
+            if ctx.voice_client:
+                await play_audio(ctx.voice_client, "start.mp3")
+                mentions = " ".join([m.mention for m in ctx.voice_client.channel.members])
+                await ctx.send(f"{mentions}\n☕ **25分経過！5分間の休憩タイムです。**")
+            
+            # 休憩タイム (5分)
+            for _ in range(300):
+                if not active_pomodoros.get(ctx.guild.id): return
+                await asyncio.sleep(1)
+
+            if ctx.voice_client:
+                await play_audio(ctx.voice_client, "start.mp3")
+                await ctx.send(f"🚀 **休憩終了！集中タイム再開！**")
+    except Exception as e:
+        print(f"Pomodoro Error: {e}")
 
 @bot.command()
 async def stop(ctx):
+    active_pomodoros[ctx.guild.id] = False # ループを止める
     if ctx.voice_client:
         await ctx.voice_client.disconnect()
-        await ctx.send("🍅 ポモドーロを終了しました。")
+    await ctx.send("🍅 ポモドーロを終了しました。")
+
+# --- 自動追跡機能 ---
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.id == bot.user.id:
+        return
+    if active_pomodoros.get(member.guild.id) and bot.user in member.guild.members:
+        vc = member.guild.voice_client
+        if vc and after.channel and after.channel != vc.channel:
+            await vc.move_to(after.channel)
 
 # --- 7. 定期タスク ---
 @tasks.loop(seconds=60)
@@ -207,7 +234,7 @@ async def on_message(message):
     if message.author.bot: return
     await bot.process_commands(message)
 
-    # --- 「順位」コマンドの改良 ---
+    # --- 順位表示機能 (差分表示付き) ---
     if message.content == "順位" and "勉強時間報告" in message.channel.name:
         now = datetime.now(JST)
         monday = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
@@ -228,19 +255,55 @@ async def on_message(message):
         else:
             current_total = ranking[found_index][1]
             msg = f"📊 {message.author.mention} さんの現在の順位は **{found_index + 1}位** ({current_total/60:.1f}h) です！"
-            
-            # 1位じゃない場合、ひとつ上の人との差を計算
             if found_index > 0:
                 prev_user_total = ranking[found_index - 1][1]
                 diff = (prev_user_total - current_total) / 60
                 msg += f"\n🏃 ひとつ上の順位まであと **{diff:.1f}時間** です！"
             else:
                 msg += "\n👑 現在1位！このまま走り抜けましょう！"
-                
             await message.channel.send(msg)
         return
 
-    # --- 記録処理 ---
+    # --- 特例：他人の勉強時間を追加する機能 (今週/累計選択式) ---
+    if message.content.startswith("特例") and message.mentions:
+        target_user = message.mentions[0]
+        clean_content = message.content.replace(f"<@{target_user.id}>", "").replace(f"<@!{target_user.id}>", "")
+        
+        added_minutes = 0
+        hr_match = re.search(r'(\d+(\.\d+)?)時間', clean_content)
+        min_match = re.search(r'(\d+)分', clean_content)
+        if hr_match: added_minutes += float(hr_match.group(1)) * 60
+        if min_match: added_minutes += int(min_match.group(1))
+
+        if added_minutes > 0:
+            now = datetime.now(JST)
+            if "累計" in clean_content:
+                record_date = "2000-01-01"
+                type_label = "🏆 累計のみ"
+            else:
+                record_date = now.strftime('%Y-%m-%d')
+                type_label = "📅 今週＋累計"
+
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (target_user.id, int(added_minutes), record_date))
+            conn.commit()
+            
+            monday_str = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (target_user.id, monday_str))
+            target_weekly = (c.fetchone()[0] or 0)
+            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (target_user.id, ))
+            target_total = (c.fetchone()[0] or 0)
+            conn.close()
+
+            await message.channel.send(
+                f"⚠️ **特例処理完了 ({type_label})**\n"
+                f"{target_user.mention} に **{int(added_minutes)}分** 追加しました。\n"
+                f"📊 今週合計: {target_weekly/60:.1f}h / 🏆 累計: {target_total/60:.1f}h"
+            )
+        return
+
+    # --- 通常の勉強時間記録 ---
     minutes = 0
     hr_match = re.search(r'(\d+(\.\d+)?)時間', message.content)
     min_match = re.search(r'(\d+)分', message.content)
@@ -260,8 +323,8 @@ async def on_message(message):
         my_weekly_mins = (c.fetchone()[0] or 0)
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (message.author.id,))
         total_mins = (c.fetchone()[0] or 0)
-        
         conn.close()
+        
         current_rank = await update_roles(message.author, my_weekly_mins/60)
         
         embed = discord.Embed(title="📝 学習記録完了", color=discord.Color.green())
