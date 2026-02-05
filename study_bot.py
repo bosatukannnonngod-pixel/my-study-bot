@@ -244,7 +244,7 @@ async def on_message(message):
     if message.author.bot: return
     await bot.process_commands(message)
 
-    # --- 特例機能 ---
+    # --- 特例機能 (修正済み) ---
     if message.content.startswith("特例") and message.mentions:
         target_user = message.mentions[0]
         clean_content = message.content.replace(f"<@{target_user.id}>", "").replace(f"<@!{target_user.id}>", "")
@@ -261,9 +261,11 @@ async def on_message(message):
             
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
+            # メンションされたユーザーIDを指定して挿入
             c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (target_user.id, int(added_minutes), record_date))
             conn.commit()
             
+            # 確認用の集計もメンションされたユーザーIDで行う
             monday_str = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
             c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (target_user.id, monday_str))
             target_weekly = (c.fetchone()[0] or 0)
