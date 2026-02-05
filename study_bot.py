@@ -91,7 +91,7 @@ async def update_roles(member, weekly_hrs):
             return f"{target_role_name}(権限不足)"
     return target_role_name
 
-# --- 5. 音声再生用関数 (デバッグ・強化版) ---
+# --- 5. 音声再生用関数 (エラー修正・Koyeb最適化版) ---
 async def play_audio(vc, filename):
     if not vc or not vc.is_connected():
         print("❌ 音声再生エラー: VCに接続されていません。")
@@ -99,32 +99,37 @@ async def play_audio(vc, filename):
 
     if not os.path.exists(filename):
         print(f"❌ ファイル未発見: {filename}")
+        print(f"📂 現在のディレクトリ内容: {os.listdir('.')}")
         return
 
     try:
         if vc.is_playing():
             vc.stop()
         
+        # FFmpegのパスを探索
         ffmpeg_exe = shutil.which("ffmpeg")
         if not ffmpeg_exe:
-            possible_paths = ["/app/.apt/usr/bin/ffmpeg", "/workspace/.apt/usr/bin/ffmpeg", "/usr/bin/ffmpeg"]
+            possible_paths = ["/usr/bin/ffmpeg", "/app/.apt/usr/bin/ffmpeg", "/workspace/.apt/usr/bin/ffmpeg"]
             for path in possible_paths:
                 if os.path.exists(path):
                     ffmpeg_exe = path
                     break
         
+        # 修正: エラーの原因だった「reconnect」オプションを削除（ローカル再生には不要）
         source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(
             filename,
             executable=ffmpeg_exe or "ffmpeg",
-            before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
             options="-vn"
         ))
         source.volume = 0.5
-        vc.play(source)
+        
+        print(f"🎵 再生準備完了: {filename} (FFmpeg: {ffmpeg_exe})")
+        vc.play(source, after=lambda e: print(f"✅ 再生終了: {e}") if e else print("✅ 再生完了"))
+        
         while vc.is_playing():
             await asyncio.sleep(1)
     except Exception as e:
-        print(f"❌ Audio Play Error: {e}")
+        print(f"❌ Audio Play Error (詳細): {e}")
 
 # --- 6. トラブルイベント管理タスク ---
 @tasks.loop(hours=1)
@@ -138,7 +143,7 @@ async def check_bot_event():
     
     status, msg, target_hp, current_hp, deadline, last_date = event_data
 
-    # 期限切れチェック（トラブル中のみ）
+    # 期限切れチェック
     if status == 'trouble':
         if now > datetime.fromisoformat(deadline):
             c.execute("UPDATE bot_events SET status='normal', last_event_date=?", (now.isoformat(),))
@@ -147,11 +152,10 @@ async def check_bot_event():
                 ch = discord.utils.get(guild.channels, name="勉強時間報告")
                 if ch: await ch.send("⏰ トラブルの期限が過ぎてしまいました…（ボットはなんとか自力で生還しました）")
 
-    # 新規イベント発生チェック（通常時のみ）
+    # 新規イベント発生（7〜10日に1回）
     elif status == 'normal':
         last_dt = datetime.fromisoformat(last_date)
         days_since = (now - last_dt).days
-        # 7〜10日に1回の頻度で発生
         if days_since >= random.randint(7, 10):
             troubles = [
                 "池の中に落ちちゃいました！助けてください！！",
@@ -160,7 +164,7 @@ async def check_bot_event():
                 "みんなの力でプリンを作りましょう！！クッキングです♬"
             ]
             new_msg = random.choice(troubles)
-            hp = random.randint(15, 25) # 解決に必要な勉強時間(h)
+            hp = random.randint(15, 25)
             new_deadline = (now + timedelta(days=3)).isoformat()
             
             c.execute("UPDATE bot_events SET status='trouble', message=?, target_hp=?, current_hp=?, deadline=?", 
@@ -201,13 +205,13 @@ async def pomodoro(ctx):
 
     try:
         while active_pomodoros.get(ctx.guild.id):
-            for _ in range(1500): # 25分
+            for _ in range(1500): # 25分集中
                 if not active_pomodoros.get(ctx.guild.id): return
                 await asyncio.sleep(1)
             if ctx.voice_client:
                 await play_audio(ctx.voice_client, "start.mp3")
                 await ctx.send("☕ **25分経過！5分間の休憩タイムです。**")
-            for _ in range(300): # 5分
+            for _ in range(300): # 5分休憩
                 if not active_pomodoros.get(ctx.guild.id): return
                 await asyncio.sleep(1)
             if ctx.voice_client:
@@ -229,7 +233,6 @@ async def on_message(message):
     await bot.process_commands(message)
 
     if message.content == "順位" and "勉強時間報告" in message.channel.name:
-        # (既存の順位表示ロジック)
         now = datetime.now(JST)
         monday = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
         conn = sqlite3.connect(DB_PATH)
@@ -259,53 +262,36 @@ async def on_message(message):
         now = datetime.now(JST)
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        
-        # 勉強時間をDBに保存
         c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (message.author.id, int(minutes), now.strftime('%Y-%m-%d')))
         
-        # トラブルイベントの進行
+        # トラブル進行
         c.execute("SELECT status, current_hp FROM bot_events")
         status, current_hp = c.fetchone()
         
         trouble_msg = ""
         if status == 'trouble':
-            reduced_hp = minutes / 60  # 勉強時間分(h)体力を減らす
-            new_hp = max(0, current_hp - reduced_hp)
+            study_hours = minutes / 60
+            new_hp = max(0, current_hp - study_hours)
             c.execute("UPDATE bot_events SET current_hp=?", (new_hp,))
-            
             if new_hp <= 0:
                 c.execute("UPDATE bot_events SET status='normal', last_event_date=?", (now.isoformat(),))
                 trouble_msg = "\n\n✨ **トラブル解決！ありがとうございます！本当に助かりました！！**"
             else:
-                trouble_msg = f"\n\n🛠️ トラブル解決まであと **{new_hp:.1f}時間** 分の報告が必要です！"
+                trouble_msg = f"\n\n🛠️ トラブル解決まであと **{new_hp:.1f}時間** 分！"
         
         conn.commit()
-        
-        # ランク更新用データ取得
         monday_str = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (message.author.id, monday_str))
         my_weekly_mins = (c.fetchone()[0] or 0)
         conn.close()
 
         current_rank = await update_roles(message.author, my_weekly_mins/60)
-        
         embed = discord.Embed(title="📝 学習記録完了", description=f"今回の記録: {int(minutes)}分{trouble_msg}", color=discord.Color.green())
         embed.add_field(name="📅 今週の合計", value=f"{my_weekly_mins/60:.1f}時間", inline=True)
         embed.add_field(name="🎖️ ランク", value=current_rank, inline=True)
         await message.channel.send(embed=embed)
 
 # --- 9. 起動と定期タスク ---
-@bot.event
-async def on_ready():
-    init_db()
-    if not daily_countdown.is_running(): daily_countdown.start()
-    if not weekly_ranking_announcement.is_running(): weekly_ranking_announcement.start()
-    if not check_lazy_users.is_running(): check_lazy_users.start()
-    if not check_bot_event.is_running(): check_bot_event.start()
-    print(f'Logged in as {bot.user}')
-
-# (daily_countdown, weekly_ranking_announcement, check_lazy_users, on_voice_state_update, rival などの既存コードは省略していますが、合成時はそのまま残してください)
-
 @tasks.loop(seconds=60)
 async def daily_countdown():
     now = datetime.now(JST)
@@ -379,5 +365,14 @@ async def rival(ctx, member: discord.Member):
     conn.commit()
     conn.close()
     await ctx.send(f"🔥 {member.display_name}さんをライバルに設定しました！")
+
+@bot.event
+async def on_ready():
+    init_db()
+    if not daily_countdown.is_running(): daily_countdown.start()
+    if not weekly_ranking_announcement.is_running(): weekly_ranking_announcement.start()
+    if not check_lazy_users.is_running(): check_lazy_users.start()
+    if not check_bot_event.is_running(): check_bot_event.start()
+    print(f'Logged in as {bot.user}')
 
 bot.run(TOKEN)
