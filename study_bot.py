@@ -91,7 +91,7 @@ async def update_roles(member, weekly_hrs):
             return f"{target_role_name}(権限不足)"
     return target_role_name
 
-# --- 5. 音声再生用関数 (エラー修正・Koyeb最適化版) ---
+# --- 5. 音声再生用関数 (音量指定版) ---
 async def play_audio(vc, filename):
     if not vc or not vc.is_connected():
         print("❌ 音声再生エラー: VCに接続されていません。")
@@ -106,7 +106,6 @@ async def play_audio(vc, filename):
         if vc.is_playing():
             vc.stop()
         
-        # FFmpegのパスを探索
         ffmpeg_exe = shutil.which("ffmpeg")
         if not ffmpeg_exe:
             possible_paths = ["/usr/bin/ffmpeg", "/app/.apt/usr/bin/ffmpeg", "/workspace/.apt/usr/bin/ffmpeg"]
@@ -115,15 +114,16 @@ async def play_audio(vc, filename):
                     ffmpeg_exe = path
                     break
         
-        # 修正: エラーの原因だった「reconnect」オプションを削除（ローカル再生には不要）
         source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(
             filename,
             executable=ffmpeg_exe or "ffmpeg",
             options="-vn"
         ))
-        source.volume = 0.5
         
-        print(f"🎵 再生準備完了: {filename} (FFmpeg: {ffmpeg_exe})")
+        # --- 音量を 0.25 に設定 ---
+        source.volume = 0.25
+        
+        print(f"🎵 再生準備完了: {filename} (Volume: {source.volume})")
         vc.play(source, after=lambda e: print(f"✅ 再生終了: {e}") if e else print("✅ 再生完了"))
         
         while vc.is_playing():
@@ -143,7 +143,6 @@ async def check_bot_event():
     
     status, msg, target_hp, current_hp, deadline, last_date = event_data
 
-    # 期限切れチェック
     if status == 'trouble':
         if now > datetime.fromisoformat(deadline):
             c.execute("UPDATE bot_events SET status='normal', last_event_date=?", (now.isoformat(),))
@@ -152,7 +151,6 @@ async def check_bot_event():
                 ch = discord.utils.get(guild.channels, name="勉強時間報告")
                 if ch: await ch.send("⏰ トラブルの期限が過ぎてしまいました…（ボットはなんとか自力で生還しました）")
 
-    # 新規イベント発生（7〜10日に1回）
     elif status == 'normal':
         last_dt = datetime.fromisoformat(last_date)
         days_since = (now - last_dt).days
@@ -226,7 +224,7 @@ async def stop(ctx):
     if ctx.voice_client: await ctx.voice_client.disconnect()
     await ctx.send("🍅 ポモドーロを終了しました。")
 
-# --- 8. イベント処理 (記録・トラブル解決) ---
+# --- 8. イベント処理 (記録・トラブル解決・リアルタイム順位) ---
 @bot.event
 async def on_message(message):
     if message.author.bot: return
@@ -280,15 +278,28 @@ async def on_message(message):
                 trouble_msg = f"\n\n🛠️ トラブル解決まであと **{new_hp:.1f}時間** 分！"
         
         conn.commit()
+
+        # --- リアルタイム順位と合計の再計算 ---
         monday_str = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
-        c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (message.author.id, monday_str))
-        my_weekly_mins = (c.fetchone()[0] or 0)
+        c.execute("SELECT user_id, SUM(minutes) as total FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY total DESC", (monday_str,))
+        ranking = c.fetchall()
+        
+        my_rank = 0
+        my_weekly_mins = 0
+        for i, (uid, total) in enumerate(ranking, 1):
+            if uid == message.author.id:
+                my_rank = i
+                my_weekly_mins = total
+                break
         conn.close()
 
-        current_rank = await update_roles(message.author, my_weekly_mins/60)
+        current_rank_name = await update_roles(message.author, my_weekly_mins/60)
+        
+        # エンベッドに順位を合成して表示
         embed = discord.Embed(title="📝 学習記録完了", description=f"今回の記録: {int(minutes)}分{trouble_msg}", color=discord.Color.green())
         embed.add_field(name="📅 今週の合計", value=f"{my_weekly_mins/60:.1f}時間", inline=True)
-        embed.add_field(name="🎖️ ランク", value=current_rank, inline=True)
+        embed.add_field(name="📊 現在の順位", value=f"**{my_rank}位**", inline=True)
+        embed.add_field(name="🎖️ ランク", value=current_rank_name, inline=True)
         await message.channel.send(embed=embed)
 
 # --- 9. 起動と定期タスク ---
