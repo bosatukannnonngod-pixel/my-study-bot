@@ -1,23 +1,30 @@
 import http.server
 import socketserver
 import threading
+import os
 import discord
 from discord.ext import commands, tasks
 import sqlite3
 from datetime import datetime, timedelta, timezone
 import re
-import os
 import asyncio
 import matplotlib.pyplot as plt
 
-# --- 1. Koyeb強制終了対策（Keep Alive） ---
+# --- 1. Koyeb対策: 強制終了を防ぐサーバー ---
 def keep_alive():
-    handler = http.server.SimpleHTTPRequestHandler
+    class HealthHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"I am alive!")
+    
+    port = int(os.environ.get("PORT", 8080))
     try:
-        with socketserver.TCPServer(("", 8000), handler) as httpd:
+        with socketserver.TCPServer(("", port), HealthHandler) as httpd:
+            print(f"Serving on port {port}")
             httpd.serve_forever()
-    except:
-        pass
+    except Exception as e:
+        print(f"Server Error: {e}")
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
@@ -52,23 +59,22 @@ def update_last_seen(user_id):
     conn.commit()
     conn.close()
 
-# --- 4. ランク更新機能 ---
+# --- 4. 役職更新 ---
 async def update_roles(member, weekly_hrs):
-    if weekly_hrs >= 20: target_role_name = "マスター"
-    elif weekly_hrs >= 11: target_role_name = "ゴールド"
-    elif weekly_hrs >= 6: target_role_name = "シルバー"
-    else: target_role_name = "メタル"
-
+    ranks = {"マスター": 20, "ゴールド": 11, "シルバー": 6, "メタル": 0}
+    target_role_name = "メタル"
+    for name, hrs in ranks.items():
+        if weekly_hrs >= hrs:
+            target_role_name = name
+            break
     new_role = discord.utils.get(member.guild.roles, name=target_role_name)
     if new_role:
         try:
-            all_ranks = ["メタル", "シルバー", "ゴールド", "マスター"]
-            to_remove = [r for r in member.roles if r.name in all_ranks and r.name != target_role_name]
+            to_remove = [r for r in member.roles if r.name in ranks.keys() and r.name != target_role_name]
             if to_remove: await member.remove_roles(*to_remove)
             if new_role not in member.roles: await member.add_roles(new_role)
             return target_role_name
-        except Exception as e:
-            print(f"Role Update Error: {e}")
+        except:
             return f"{target_role_name}(権限不足)"
     return target_role_name
 
@@ -76,9 +82,10 @@ async def update_roles(member, weekly_hrs):
 async def play_audio(vc, filename):
     if vc and vc.is_connected():
         if not os.path.exists(filename):
-            print(f"Error: {filename} が見つかりません。")
+            print(f"Notice: {filename} が見つかりません。")
             return
         try:
+            if vc.is_playing(): vc.stop()
             source = discord.FFmpegPCMAudio(filename)
             vc.play(source)
             while vc.is_playing():
@@ -86,48 +93,39 @@ async def play_audio(vc, filename):
         except Exception as e:
             print(f"Audio Play Error: {e}")
 
-# --- 6. コマンド: ポモドーロタイマー ---
+# --- 6. ポモドーロ機能 ---
 @bot.command()
 async def pomodoro(ctx):
     if not ctx.author.voice:
         await ctx.send("🍅 まずはボイスチャンネルに入ってください！")
         return
-
+    
     channel = ctx.author.voice.channel
     try:
         vc = await channel.connect()
     except discord.ClientException:
-        vc = ctx.voice_client 
+        vc = ctx.voice_client
 
-    await ctx.send(f"🍅 **ポモドーロタイマー開始！**\n25分集中→5分休憩のサイクルを開始します。音が鳴ったら休憩ですよ！")
+    await ctx.send("🍅 **ポモドーロ開始！** (25分集中 / 5分休憩)")
+    await play_audio(vc, "start.mp3")
 
-    try:
-        while True:
-            # 集中開始：音を鳴らす
-            await play_audio(vc, "start.mp3")
-            await asyncio.sleep(1500) # 25分
-
-            # 25分終了：音を鳴らす
-            await play_audio(vc, "start.mp3")
-            members = channel.members
-            mentions = " ".join([m.mention for m in members])
-            await ctx.send(f"{mentions}\n☕ **25分経過！5分間の休憩タイムです。**")
-            
-            await asyncio.sleep(300) # 5分
-            await ctx.send(f"{mentions}\n🚀 **休憩終了！また25分集中しましょう！**")
-            
-    except Exception as e:
-        print(f"Timer Stop: {e}")
-        if ctx.voice_client:
-            await ctx.voice_client.disconnect()
+    while True:
+        await asyncio.sleep(1500) 
+        await play_audio(vc, "start.mp3")
+        mentions = " ".join([m.mention for m in channel.members])
+        await ctx.send(f"{mentions}\n☕ **25分経過！5分間の休憩タイムです。**")
+        
+        await asyncio.sleep(300) 
+        await play_audio(vc, "start.mp3")
+        await ctx.send(f"{mentions}\n🚀 **休憩終了！集中タイム再開！**")
 
 @bot.command()
 async def stop(ctx):
     if ctx.voice_client:
         await ctx.voice_client.disconnect()
-        await ctx.send("🍅 タイマーを終了しました。")
+        await ctx.send("🍅 ポモドーロを終了しました。")
 
-# --- 7. 定期タスク (カウントダウン, ランキング, サボり防止) ---
+# --- 7. 定期タスク ---
 @tasks.loop(seconds=60)
 async def daily_countdown():
     now = datetime.now(JST)
@@ -149,7 +147,6 @@ async def weekly_ranking_announcement():
         conn.close()
         if not ranking: return
 
-        # グラフ作成
         names, hours = [], []
         for uid, mins in ranking[:5]:
             user = bot.get_user(uid)
@@ -210,7 +207,40 @@ async def on_message(message):
     if message.author.bot: return
     await bot.process_commands(message)
 
-    # 勉強時間の自動抽出
+    # --- 「順位」コマンドの改良 ---
+    if message.content == "順位" and "勉強時間報告" in message.channel.name:
+        now = datetime.now(JST)
+        monday = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT user_id, SUM(minutes) as total FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY total DESC", (monday,))
+        ranking = c.fetchall()
+        conn.close()
+        
+        found_index = -1
+        for i, (user_id, total) in enumerate(ranking):
+            if user_id == message.author.id:
+                found_index = i
+                break
+        
+        if found_index == -1:
+            await message.channel.send("まだ今週の記録がないようです。まずは記録してみましょう！")
+        else:
+            current_total = ranking[found_index][1]
+            msg = f"📊 {message.author.mention} さんの現在の順位は **{found_index + 1}位** ({current_total/60:.1f}h) です！"
+            
+            # 1位じゃない場合、ひとつ上の人との差を計算
+            if found_index > 0:
+                prev_user_total = ranking[found_index - 1][1]
+                diff = (prev_user_total - current_total) / 60
+                msg += f"\n🏃 ひとつ上の順位まであと **{diff:.1f}時間** です！"
+            else:
+                msg += "\n👑 現在1位！このまま走り抜けましょう！"
+                
+            await message.channel.send(msg)
+        return
+
+    # --- 記録処理 ---
     minutes = 0
     hr_match = re.search(r'(\d+(\.\d+)?)時間', message.content)
     min_match = re.search(r'(\d+)分', message.content)
@@ -228,33 +258,17 @@ async def on_message(message):
         monday_str = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (message.author.id, monday_str))
         my_weekly_mins = (c.fetchone()[0] or 0)
+        c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (message.author.id,))
+        total_mins = (c.fetchone()[0] or 0)
         
-        # ライバル比較
-        c.execute("SELECT rival_id FROM rivals WHERE user_id=?", (message.author.id,))
-        rival_row = c.fetchone()
-        rival_msg = ""
-        if rival_row:
-            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (rival_row[0], monday_str))
-            rival_weekly_mins = (c.fetchone()[0] or 0)
-            diff = (my_weekly_mins - rival_weekly_mins) / 60
-            rival_msg = f"\n🔥 ライバルと **{diff:.1f}h** 差です！"
-
         conn.close()
         current_rank = await update_roles(message.author, my_weekly_mins/60)
-        await message.channel.send(f"✅ 記録完了: {int(minutes)}分\n🎖️ ランク: {current_rank}{rival_msg}")
-
-    # 「順位」コマンド
-    if message.content == "順位" and message.channel.name == "勉強時間報告":
-        now = datetime.now(JST)
-        monday = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT user_id, SUM(minutes) as total FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY total DESC", (monday,))
-        ranking = c.fetchall()
-        conn.close()
-        for i, (user_id, total) in enumerate(ranking, 1):
-            if user_id == message.author.id:
-                await message.channel.send(f"📊 現在 **{i}位** ({total/60:.1f}h) です！")
-                break
+        
+        embed = discord.Embed(title="📝 学習記録完了", color=discord.Color.green())
+        embed.add_field(name="今回の記録", value=f"{int(minutes)}分", inline=False)
+        embed.add_field(name="📅 今週の合計", value=f"{my_weekly_mins/60:.1f}時間", inline=True)
+        embed.add_field(name="🏆 全期間累計", value=f"{total_mins/60:.1f}時間", inline=True)
+        embed.add_field(name="🎖️ ランク", value=current_rank, inline=False)
+        await message.channel.send(embed=embed)
 
 bot.run(TOKEN)
