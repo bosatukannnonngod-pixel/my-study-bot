@@ -199,13 +199,52 @@ async def stop(ctx):
     if ctx.voice_client: await ctx.voice_client.disconnect()
     await ctx.send("🍅 ポモドーロを終了しました。")
 
-# --- 8. イベント処理 (記録・トラブル解決・順位・ライバル比較・特例) ---
+# --- 8. 週次ランキンググラフ作成 ---
+@tasks.loop(seconds=60)
+async def weekly_ranking_announcement():
+    now = datetime.now(JST)
+    # 月曜日 00:00 に実行
+    if now.weekday() == 0 and now.hour == 0 and now.minute == 0:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        one_week_ago = (now - timedelta(days=7)).strftime('%Y-%m-%d')
+        c.execute("SELECT user_id, SUM(minutes) FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY SUM(minutes) DESC", (one_week_ago,))
+        ranking = c.fetchall()
+        conn.close()
+        
+        if not ranking: return
+
+        # グラフ作成
+        names, hours = [], []
+        for uid, mins in ranking[:10]: # 上位10名
+            user = bot.get_user(uid)
+            names.append(user.display_name if user else f"ID:{uid}")
+            hours.append(mins / 60)
+
+        plt.figure(figsize=(10, 6))
+        plt.barh(names[::-1], hours[::-1], color='skyblue')
+        plt.xlabel('Hours')
+        plt.title(f'Weekly Study Ranking ({one_week_ago} to {now.strftime("%Y-%m-%d")})')
+        plt.tight_layout()
+        plt.savefig('weekly_ranking.png')
+        plt.close()
+
+        msg = "🏆 **週間ランキング発表** 🏆\n"
+        for i, (user_id, total_min) in enumerate(ranking, 1):
+            msg += f"{i}位: <@{user_id}> ({total_min/60:.1f}h)\n"
+
+        for guild in bot.guilds:
+            channel = discord.utils.get(guild.channels, name="勉強時間報告")
+            if channel:
+                await channel.send(msg, file=discord.File('weekly_ranking.png'))
+
+# --- 9. イベント処理 (記録・トラブル解決・順位・ライバル比較・特例) ---
 @bot.event
 async def on_message(message):
     if message.author.bot: return
     await bot.process_commands(message)
 
-    # --- 特例：他人の勉強時間を追加する機能 ---
+    # --- 特例機能 ---
     if message.content.startswith("特例") and message.mentions:
         target_user = message.mentions[0]
         clean_content = message.content.replace(f"<@{target_user.id}>", "").replace(f"<@!{target_user.id}>", "")
@@ -217,12 +256,8 @@ async def on_message(message):
         
         if added_minutes > 0:
             now = datetime.now(JST)
-            if "累計" in clean_content:
-                record_date = "2000-01-01"
-                type_label = "🏆 累計のみ"
-            else:
-                record_date = now.strftime('%Y-%m-%d')
-                type_label = "📅 今週＋累計"
+            record_date = "2000-01-01" if "累計" in clean_content else now.strftime('%Y-%m-%d')
+            type_label = "🏆 累計のみ" if "累計" in clean_content else "📅 今週＋累計"
             
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
@@ -236,14 +271,10 @@ async def on_message(message):
             target_total = (c.fetchone()[0] or 0)
             conn.close()
             
-            await message.channel.send(
-                f"⚠️ **特例処理完了 ({type_label})**\n"
-                f"{target_user.mention} に **{int(added_minutes)}分** 追加しました。\n"
-                f"📊 今週合計: {target_weekly/60:.1f}h / 🏆 累計: {target_total/60:.1f}h"
-            )
+            await message.channel.send(f"⚠️ **特例処理完了 ({type_label})**\n{target_user.mention} に **{int(added_minutes)}分** 追加しました。\n📊 今週合計: {target_weekly/60:.1f}h / 🏆 累計: {target_total/60:.1f}h")
             return
 
-    # 通常の勉強時間解析
+    # 通常解析
     minutes = 0
     hr_match = re.search(r'(\d+(\.\d+)?)時間', message.content)
     min_match = re.search(r'(\d+)分', message.content)
@@ -270,14 +301,10 @@ async def on_message(message):
             else:
                 trouble_msg = f"\n\n🛠️ トラブル解決まであと **{new_hp:.1f}時間** 分！"
         
-        # 統計と順位の計算
         monday_str = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
-        
-        # 累計時間の計算
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id = ?", (message.author.id,))
         total_mins = c.fetchone()[0] or 0
         
-        # 今週の合計と順位
         c.execute("SELECT user_id, SUM(minutes) as s FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY s DESC", (monday_str,))
         ranking = c.fetchall()
         my_rank = 0
@@ -288,7 +315,6 @@ async def on_message(message):
                 my_weekly_mins = total
                 break
         
-        # ライバルとの差を計算
         c.execute("SELECT rival_id FROM rivals WHERE user_id = ?", (message.author.id,))
         rival_data = c.fetchone()
         rival_msg = "未設定"
@@ -299,17 +325,13 @@ async def on_message(message):
             diff = (my_weekly_mins - rival_mins) / 60
             rival_user = bot.get_user(rival_id)
             rival_name = rival_user.display_name if rival_user else f"ID:{rival_id}"
-            if diff >= 0:
-                rival_msg = f"{rival_name}に **{diff:.1f}h** リード！"
-            else:
-                rival_msg = f"{rival_name}に **{abs(diff):.1f}h** 負けてる！"
+            rival_msg = f"{rival_name}に **{diff:.1f}h** リード！" if diff >= 0 else f"{rival_name}に **{abs(diff):.1f}h** 負けてる！"
 
         conn.commit()
         conn.close()
 
         current_rank_name = await update_roles(message.author, my_weekly_mins/60)
         
-        # エンベッド表示
         embed = discord.Embed(title="📝 学習記録完了", description=f"今回の記録: {int(minutes)}分{trouble_msg}", color=discord.Color.green())
         embed.add_field(name="📅 今週の合計", value=f"{my_weekly_mins/60:.1f}時間", inline=True)
         embed.add_field(name="📚 累計学習時間", value=f"{total_mins/60:.1f}時間", inline=True)
@@ -318,7 +340,7 @@ async def on_message(message):
         embed.add_field(name="🎖️ ランク", value=current_rank_name, inline=True)
         await message.channel.send(embed=embed)
 
-# --- 9. 起動と定期タスク ---
+# --- 10. 起動と定期タスク ---
 @tasks.loop(seconds=60)
 async def daily_countdown():
     now = datetime.now(JST)
@@ -335,13 +357,14 @@ async def rival(ctx, member: discord.Member):
     c.execute("INSERT OR REPLACE INTO rivals (user_id, rival_id) VALUES (?, ?)", (ctx.author.id, member.id))
     conn.commit()
     conn.close()
-    await ctx.send(f"🔥 {member.display_name}さんをライバルに設定しました！記録時に差が表示されます。")
+    await ctx.send(f"🔥 {member.display_name}さんをライバルに設定しました！")
 
 @bot.event
 async def on_ready():
     init_db()
     if not daily_countdown.is_running(): daily_countdown.start()
     if not check_bot_event.is_running(): check_bot_event.start()
+    if not weekly_ranking_announcement.is_running(): weekly_ranking_announcement.start()
     print(f'Logged in as {bot.user}')
 
 bot.run(TOKEN)
