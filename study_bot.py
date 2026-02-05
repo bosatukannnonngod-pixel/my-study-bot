@@ -142,7 +142,7 @@ async def stop(ctx):
         await ctx.voice_client.disconnect()
     await ctx.send("🍅 ポモドーロを終了しました。")
 
-# --- 自動追跡機能 ---
+# --- 自動追跡機能 (移動先で音を鳴らす修正を適用) ---
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.id == bot.user.id:
@@ -150,7 +150,11 @@ async def on_voice_state_update(member, before, after):
     if active_pomodoros.get(member.guild.id) and bot.user in member.guild.members:
         vc = member.guild.voice_client
         if vc and after.channel and after.channel != vc.channel:
+            # ユーザーの後を追って移動
             await vc.move_to(after.channel)
+            # 移動先で音を鳴らす (安定のため1秒待機)
+            await asyncio.sleep(1)
+            await play_audio(vc, "start.mp3")
 
 # --- 7. 定期タスク ---
 @tasks.loop(seconds=60)
