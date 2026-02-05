@@ -1,14 +1,24 @@
-FROM python:3.10-slim
+# 1. ベースイメージとしてPythonを使用
+FROM python:3.11-slim
 
-# ここで音声を再生するためのツール（ffmpeg）を入れています
-RUN apt-get update && apt-get install -y ffmpeg libffi-dev libnacl-dev python3-dev
+# 2. FFmpegと必要なシステムライブラリをインストール
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libffi-dev \
+    python3-dev \
+    build-essential \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
+# 3. 作業ディレクトリの設定
 WORKDIR /app
 
+# 4. 依存ライブラリをコピーしてインストール
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 5. すべてのファイルをコピー
 COPY . .
 
-CMD ["python", "your_code_name.py"] 
-# ↑ your_code_name.py は自分のファイル名に変えてね
+# 6. ボットを実行
+CMD ["python", "study_bot.py"]
