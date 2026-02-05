@@ -199,13 +199,51 @@ async def stop(ctx):
     if ctx.voice_client: await ctx.voice_client.disconnect()
     await ctx.send("🍅 ポモドーロを終了しました。")
 
-# --- 8. イベント処理 (記録・トラブル解決・順位・ライバル比較) ---
+# --- 8. イベント処理 (記録・トラブル解決・順位・ライバル比較・特例) ---
 @bot.event
 async def on_message(message):
     if message.author.bot: return
     await bot.process_commands(message)
 
-    # 勉強時間解析
+    # --- 特例：他人の勉強時間を追加する機能 ---
+    if message.content.startswith("特例") and message.mentions:
+        target_user = message.mentions[0]
+        clean_content = message.content.replace(f"<@{target_user.id}>", "").replace(f"<@!{target_user.id}>", "")
+        added_minutes = 0
+        hr_match = re.search(r'(\d+(\.\d+)?)時間', clean_content)
+        min_match = re.search(r'(\d+)分', clean_content)
+        if hr_match: added_minutes += float(hr_match.group(1)) * 60
+        if min_match: added_minutes += int(min_match.group(1))
+        
+        if added_minutes > 0:
+            now = datetime.now(JST)
+            if "累計" in clean_content:
+                record_date = "2000-01-01"
+                type_label = "🏆 累計のみ"
+            else:
+                record_date = now.strftime('%Y-%m-%d')
+                type_label = "📅 今週＋累計"
+            
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (target_user.id, int(added_minutes), record_date))
+            conn.commit()
+            
+            monday_str = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (target_user.id, monday_str))
+            target_weekly = (c.fetchone()[0] or 0)
+            c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (target_user.id, ))
+            target_total = (c.fetchone()[0] or 0)
+            conn.close()
+            
+            await message.channel.send(
+                f"⚠️ **特例処理完了 ({type_label})**\n"
+                f"{target_user.mention} に **{int(added_minutes)}分** 追加しました。\n"
+                f"📊 今週合計: {target_weekly/60:.1f}h / 🏆 累計: {target_total/60:.1f}h"
+            )
+            return
+
+    # 通常の勉強時間解析
     minutes = 0
     hr_match = re.search(r'(\d+(\.\d+)?)時間', message.content)
     min_match = re.search(r'(\d+)分', message.content)
