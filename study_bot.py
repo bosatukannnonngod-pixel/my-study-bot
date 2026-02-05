@@ -79,7 +79,7 @@ async def update_roles(member, weekly_hrs):
             return f"{target_role_name}(権限不足)"
     return target_role_name
 
-# --- 5. 音声再生用関数 (自動探索・強化版) ---
+# --- 5. 音声再生用関数 (Koyeb/Heroku対応強化版) ---
 async def play_audio(vc, filename):
     if vc and vc.is_connected():
         if not os.path.exists(filename):
@@ -91,8 +91,18 @@ async def play_audio(vc, filename):
             # FFmpegの場所を自動で特定
             ffmpeg_exe = shutil.which("ffmpeg")
             if not ffmpeg_exe:
-                apt_path = "/app/.apt/usr/bin/ffmpeg"
-                ffmpeg_exe = apt_path if os.path.exists(apt_path) else "ffmpeg"
+                # KoyebでAptfileを使用した場合の代表的なパスをチェック
+                possible_paths = [
+                    "/app/.apt/usr/bin/ffmpeg",
+                    "/workspace/.apt/usr/bin/ffmpeg",
+                    "/usr/bin/ffmpeg"
+                ]
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        ffmpeg_exe = path
+                        break
+                if not ffmpeg_exe:
+                    ffmpeg_exe = "ffmpeg"
 
             source = discord.FFmpegPCMAudio(
                 filename,
@@ -304,7 +314,7 @@ async def on_message(message):
             await message.channel.send(f"⚠️ **特例処理完了 ({type_label})**\n{target_user.mention} に **{int(added_minutes)}分** 追加しました。")
         return
 
-    # --- 通常の勉強時間記録 (ライバル比較機能付き) ---
+    # --- 通常の勉強時間記録 ---
     minutes = 0
     hr_match = re.search(r'(\d+(\.\d+)?)時間', message.content)
     min_match = re.search(r'(\d+)分', message.content)
@@ -318,17 +328,15 @@ async def on_message(message):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         
-        # 記録保存
         c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (message.author.id, int(minutes), now.strftime('%Y-%m-%d')))
         conn.commit()
 
-        # 自分のデータ取得
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (message.author.id, monday_str))
         my_weekly_mins = (c.fetchone()[0] or 0)
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (message.author.id,))
         total_mins = (c.fetchone()[0] or 0)
 
-        # --- ライバル比較ロジック ---
+        # ライバル比較
         c.execute("SELECT rival_id FROM rivals WHERE user_id=?", (message.author.id,))
         rival_row = c.fetchone()
         rival_comparison = None
@@ -339,16 +347,11 @@ async def on_message(message):
             diff_mins = my_weekly_mins - rival_weekly_mins
             rival_user = bot.get_user(rival_id)
             rival_name = rival_user.display_name if rival_user else "ライバル"
-            
-            if diff_mins > 0:
-                rival_comparison = f"✨ {rival_name} さんに **{diff_mins/60:.1f}時間** リードしています！"
-            elif diff_mins < 0:
-                rival_comparison = f"🏃 {rival_name} さんまであと **{abs(diff_mins)/60:.1f}時間** です！"
-            else:
-                rival_comparison = f"🤝 {rival_name} さんと現在同じ時間です！"
+            if diff_mins > 0: rival_comparison = f"✨ {rival_name} さんに **{diff_mins/60:.1f}時間** リード！"
+            elif diff_mins < 0: rival_comparison = f"🏃 {rival_name} さんまであと **{abs(diff_mins)/60:.1f}時間**！"
+            else: rival_comparison = f"🤝 {rival_name} さんと並んでいます！"
 
         conn.close()
-        
         current_rank = await update_roles(message.author, my_weekly_mins/60)
         
         embed = discord.Embed(title="📝 学習記録完了", color=discord.Color.green())
@@ -356,10 +359,7 @@ async def on_message(message):
         embed.add_field(name="📅 今週の合計", value=f"{my_weekly_mins/60:.1f}時間", inline=True)
         embed.add_field(name="🏆 全期間累計", value=f"{total_mins/60:.1f}時間", inline=True)
         embed.add_field(name="🎖️ ランク", value=current_rank, inline=False)
-        
-        if rival_comparison:
-            embed.add_field(name="🔥 ライバルとの差", value=rival_comparison, inline=False)
-            
+        if rival_comparison: embed.add_field(name="🔥 ライバルとの差", value=rival_comparison, inline=False)
         await message.channel.send(embed=embed)
 
 bot.run(TOKEN)
