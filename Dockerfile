@@ -1,24 +1,20 @@
-# 1. ベースイメージとしてPythonを使用
+# 1. Pythonの軽量版を使用
 FROM python:3.11-slim
 
-# 2. FFmpegと必要なシステムライブラリをインストール
+# 2. FFmpegをインストールする命令（これが最重要！）
 RUN apt-get update && apt-get install -y \
     ffmpeg \
-    libffi-dev \
-    python3-dev \
-    build-essential \
-    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 作業ディレクトリの設定
+# 3. フォルダの設定
 WORKDIR /app
 
-# 4. 依存ライブラリをコピーしてインストール
+# 4. 必要なライブラリをインストール
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. すべてのファイルをコピー
+# 5. プログラム類をコピー
 COPY . .
 
-# 6. ボットを実行
-CMD ["python", "study_bot.py"]
+# 6. 実行（ファイル名が main.py ならそれに合わせてください）
+CMD ["python", "main.py"]
