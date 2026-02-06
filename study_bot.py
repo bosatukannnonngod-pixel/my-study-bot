@@ -199,9 +199,7 @@ async def pomodoro(ctx):
 
 @bot.command()
 async def stop(ctx):
-    # ポモドーロフラグを停止
     active_pomodoros[ctx.guild.id] = False
-    # ボイスチャンネルから退出
     if ctx.voice_client:
         await ctx.voice_client.disconnect()
         await ctx.send("🍅 ポモドーロを終了し、ボイスチャンネルから退出しました。")
@@ -279,7 +277,6 @@ async def check_inactive_users():
         if now - last_dt > timedelta(days=3):
             for guild in bot.guilds:
                 member = guild.get_member(user_id)
-                # Botは除外し、人間のみに通知
                 if member and not member.bot:
                     channel = discord.utils.get(guild.channels, name="勉強時間報告")
                     if channel:
@@ -408,7 +405,7 @@ async def on_message(message):
         embed.add_field(name="🎖️ ランク", value=current_rank_name, inline=True)
         await message.channel.send(embed=embed)
 
-# --- 11. 起動と定期タスク ---
+# --- 11. 起動と追加コマンド ---
 @tasks.loop(seconds=60)
 async def daily_countdown():
     now = datetime.now(JST)
@@ -417,6 +414,27 @@ async def daily_countdown():
         for guild in bot.guilds:
             channel = discord.utils.get(guild.channels, name="共通テストカウントダウン")
             if channel: await channel.send(f"📅 **{now.strftime('%m月%d日')}**\n共通テストまであと **{days_left}日**！")
+
+@bot.command()
+async def ranking(ctx):
+    now = datetime.now(JST)
+    monday_str = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id, SUM(minutes) as s FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY s DESC", (monday_str,))
+    ranking_data = c.fetchall()
+    conn.close()
+
+    if not ranking_data:
+        await ctx.send("📊 今週の学習記録はまだありません。")
+        return
+
+    msg = "🏆 **現在の週間ランキング** 🏆\n"
+    for i, (uid, total_mins) in enumerate(ranking_data, 1):
+        msg += f"{i}位: <@{uid}> ({total_mins/60:.1f}h)\n"
+    
+    embed = discord.Embed(title="学習ランキング", description=msg, color=discord.Color.blue())
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def rival(ctx, member: discord.Member):
