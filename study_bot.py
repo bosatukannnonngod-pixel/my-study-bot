@@ -48,7 +48,6 @@ def init_db():
     c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS study_logs (user_id INTEGER, minutes INTEGER, date TEXT)')
     c.execute('CREATE TABLE IF NOT EXISTS last_seen (user_id INTEGER PRIMARY KEY, last_datetime TEXT)')
-    # group_id制にアップデート
     c.execute('CREATE TABLE IF NOT EXISTS rivals (user_id INTEGER PRIMARY KEY, group_id INTEGER)')
     
     c.execute('''CREATE TABLE IF NOT EXISTS bot_events 
@@ -126,7 +125,14 @@ async def check_bot_event():
     elif status == 'normal':
         last_dt = datetime.fromisoformat(last_date)
         if (now - last_dt).days >= config_freq:
-            troubles = ["池の中に落ちちゃいました！", "怖いワニたちに囲まれます！！", "課題が多すぎて故障しそうです！！", "プリンを作りましょう！！", "海に落ちちゃいました助けて！"]
+            # メッセージリストを復元
+            troubles = [
+                "池の中に落ちちゃいました！", 
+                "怖いワニたちに囲まれます！！", 
+                "課題が多すぎて故障しそうです！！", 
+                "プリンを作りましょう！！", 
+                "海に落ちちゃいました助けて！"
+            ]
             new_msg = random.choice(troubles)
             hp = config_diff 
             new_deadline = (now + timedelta(days=3)).isoformat()
@@ -177,7 +183,7 @@ async def stop(ctx):
     if ctx.voice_client: await ctx.voice_client.disconnect()
     await ctx.send("🍅 ポモドーロを終了しました。")
 
-# --- 8. 週次ランキング発表 (全体ランキング ＋ 対戦グループ結果) ---
+# --- 8. 週次ランキング発表 ---
 @tasks.loop(seconds=60)
 async def weekly_ranking_announcement():
     now = datetime.now(JST)
@@ -186,7 +192,6 @@ async def weekly_ranking_announcement():
         c = conn.cursor()
         monday_str = (now - timedelta(days=7)).strftime('%Y-%m-%d')
 
-        # 1. 全体ランキング
         c.execute("SELECT user_id, SUM(minutes) FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY SUM(minutes) DESC", (monday_str,))
         overall = c.fetchall()
         if not overall:
@@ -197,7 +202,6 @@ async def weekly_ranking_announcement():
         for i, (user_id, total_min) in enumerate(overall, 1):
             msg += f"{i}位: <@{user_id}> ({total_min/60:.1f}h)\n"
 
-        # 2. 対戦グループ結果
         rival_msg = "\n🔥 **ライバル・大乱闘セクション** 🔥\n"
         c.execute("SELECT DISTINCT group_id FROM rivals")
         groups = c.fetchall()
@@ -248,7 +252,7 @@ async def on_message(message):
     if message.author.bot: return
     await bot.process_commands(message)
 
-    # 難易度・頻度設定
+    # 難易度設定
     if message.content.startswith("!トラブル難易度"):
         val = float(re.search(r'(\d+)', message.content).group(1))
         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
@@ -256,7 +260,15 @@ async def on_message(message):
         await message.channel.send(f"⚙️ 難易度を **{val}時間** に設定しました。")
         return
 
-    # ★ 対戦・大乱闘コマンド
+    # ★ トラブル頻度設定（統合部分）
+    if message.content.startswith("!トラブル頻度"):
+        val = int(re.search(r'(\d+)', message.content).group(1))
+        conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+        c.execute("UPDATE bot_events SET config_frequency=?", (val,)); conn.commit(); conn.close()
+        await message.channel.send(f"⚙️ トラブル発生の最低間隔を **{val}日間** に設定しました。")
+        return
+
+    # 対戦・大乱闘コマンド
     if "対戦" in message.content and len(message.mentions) >= 2:
         m1, m2 = message.mentions[0], message.mentions[1]
         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
@@ -287,7 +299,7 @@ async def on_message(message):
             await message.channel.send(f"⚔️ **{m1.display_name}** vs **{m2.display_name}** 開始！")
         conn.close(); return
 
-    # ★ 特例機能 (今週のみ/累計のみ/減算対応)
+    # 特例機能
     if message.content.startswith("特例") and message.mentions:
         target = message.mentions[0]
         hr = re.search(r'(-?\d+(\.\d+)?)時間', message.content)
@@ -302,7 +314,7 @@ async def on_message(message):
             await message.channel.send(f"⚠️ 特例処理: {target.mention} に **{int(added)}分** 適用しました。")
             return
 
-    # --- 通常報告 ---
+    # 通常報告
     hr = re.search(r'(\d+(\.\d+)?)時間', message.content)
     mn = re.search(r'(\d+)分', message.content)
     minutes = (float(hr.group(1))*60 if hr else 0) + (int(mn.group(1)) if mn else 0)
@@ -312,7 +324,6 @@ async def on_message(message):
         now = datetime.now(JST); conn = sqlite3.connect(DB_PATH); c = conn.cursor()
         c.execute("INSERT INTO study_logs VALUES (?, ?, ?)", (message.author.id, int(minutes), now.strftime('%Y-%m-%d')))
         
-        # トラブルHP
         c.execute("SELECT status, current_hp FROM bot_events"); status, hp = c.fetchone()
         t_msg = ""
         if status == 'trouble':
@@ -321,12 +332,10 @@ async def on_message(message):
             t_msg = f"\n\n✨ 解決！" if new_hp <= 0 else f"\n\n🛠️ あと **{new_hp:.1f}h**"
             if new_hp <= 0: c.execute("UPDATE bot_events SET status='normal', last_event_date=?", (now.isoformat(),))
 
-        # 集計
         mon = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=?", (message.author.id,)); total = c.fetchone()[0] or 0
         c.execute("SELECT SUM(minutes) FROM study_logs WHERE user_id=? AND date >= ?", (message.author.id, mon)); weekly = c.fetchone()[0] or 0
         
-        # ライバル差分
         c.execute("SELECT group_id FROM rivals WHERE user_id=?", (message.author.id,))
         grp = c.fetchone()
         rival_msg = "未設定"
@@ -342,7 +351,6 @@ async def on_message(message):
                 r_user = bot.get_user(rid)
                 rival_msg = f"{r_user.display_name if r_user else rid}と **{(weekly-rmins)/60:+.1f}h** 差"
 
-        # ランキング順位
         c.execute("SELECT user_id, SUM(minutes) as s FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY s DESC", (mon,))
         rank = next((i for i, (u, _) in enumerate(c.fetchall(), 1) if u == message.author.id), 0)
         
@@ -355,7 +363,18 @@ async def on_message(message):
         embed.add_field(name="🎖️ ランク", value=cur_rank)
         await message.channel.send(embed=embed)
 
-# --- 11. 起動・カウントダウン ---
+# --- 11. 追加コマンド・起動 ---
+@bot.command()
+async def ranking(ctx):
+    now = datetime.now(JST)
+    mon = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+    conn = sqlite3.connect(DB_PATH); c = conn.cursor()
+    c.execute("SELECT user_id, SUM(minutes) as s FROM study_logs WHERE date >= ? GROUP BY user_id ORDER BY s DESC", (mon,))
+    data = c.fetchall(); conn.close()
+    if not data: return await ctx.send("📊 記録なし")
+    m = "🏆 **今週のランキング**\n" + "\n".join([f"{i}位: <@{u}> ({s/60:.1f}h)" for i, (u, s) in enumerate(data, 1)])
+    await ctx.send(embed=discord.Embed(description=m, color=discord.Color.blue()))
+
 @tasks.loop(seconds=60)
 async def daily_countdown():
     now = datetime.now(JST)
